@@ -1,0 +1,118 @@
+
+CREATE DATABASE senior
+USE senior
+
+
+-- What are the top 5 brands by receipt scanned among users 21 and over
+SELECT TOP 5 P.BRAND, COUNT(T.RECEIPT_ID) FROM USER_TAKEHOME U
+JOIN TRANSACTION_TAKEHOME T
+ON U.ID = T.USER_ID
+JOIN PRODUCTS_TAKEHOME P
+ON P.BARCODE = T.BARCODE
+GROUP BY P.BRAND, YEAR(GETDATE()) - YEAR(U.BIRTH_DATE) 
+HAVING YEAR(GETDATE()) - YEAR(U.BIRTH_DATE)  > 21
+ORDER BY YEAR(GETDATE()) - YEAR(U.BIRTH_DATE) DESC
+
+
+-- What are the top5 brands by sales among users that have had their account for at least six months?
+SELECT BRAND, CREATED_DATE FROM PRODUCTS_TAKEHOME P
+JOIN TRANSACTION_TAKEHOME T
+ON P.BARCODE = T.BARCODE
+JOIN USER_TAKEHOME U
+ON U.ID = T.USER_ID
+WHERE U.CREATED_DATE >= DATEADD(MONTH, DATEDIFF(MONTH, 0, DATEADD(M,-7, (SELECT MAX(PURCHASE_DATE) FROM TRANSACTION_TAKEHOME))),0)
+
+
+-- WHO ARE THE POWER USERS OF FETCH
+--Aggregate user transaction data
+WITH user_stats AS (
+    SELECT 
+        t.[USER_ID],
+        COUNT(t.[RECEIPT_ID]) AS transaction_count,
+        SUM(t.[FINAL_SALE]) AS total_spend
+    FROM [TRANSACTION_TAKEHOME] t
+    GROUP BY t.[USER_ID]
+),
+
+--Determine thresholds for power users (top 10%)
+user_percentiles AS (
+    SELECT
+        [USER_ID],
+        transaction_count,
+        total_spend,
+        PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY transaction_count) 
+            OVER () AS trans_threshold,
+        PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY total_spend) 
+            OVER () AS spend_threshold
+    FROM user_stats
+),
+
+--Identify power users
+power_users AS (
+    SELECT 
+        [USER_ID],
+        transaction_count,
+        total_spend
+    FROM user_percentiles
+    WHERE transaction_count >= trans_threshold OR total_spend >= spend_threshold
+)
+
+--Finally Enrich power users with demographic data
+SELECT 
+    p.[USER_ID],
+    p.transaction_count,
+    p.total_spend,
+    u.[STATE],
+    u.[GENDER]
+FROM power_users p
+LEFT JOIN [USER_TAKEHOME] u ON p.[USER_ID] = u.[ID]
+ORDER BY p.total_spend DESC, p.transaction_count DESC;
+
+
+
+
+
+-- What are the percentage of Sales in the Health and Wellness category by generation
+-- Filter transactions for FETCH brand
+WITH fetch_transactions AS (
+    SELECT 
+        t.[PURCHASE_DATE],
+        t.[FINAL_SALE],
+        t.[FINAL_QUANTITY],
+        p.[BRAND]
+    FROM [TRANSACTION_TAKEHOME] t
+    JOIN [PRODUCTS_TAKEHOME] p ON t.[BARCODE] = p.[BARCODE]
+    WHERE p.[BRAND] = 'FETCH'
+),
+
+-- Aggregate yearly sales data
+yearly_sales AS (
+    SELECT 
+        YEAR(t.[PURCHASE_DATE]) AS year,
+        SUM(t.[FINAL_SALE]) AS total_sales
+    FROM fetch_transactions t
+    GROUP BY YEAR(t.[PURCHASE_DATE])
+),
+
+-- Calculate year-over-year growth
+yearly_growth AS (
+    SELECT 
+        s.year,
+        s.total_sales,
+        LAG(s.total_sales) OVER (ORDER BY s.year) AS previous_sales,
+        CASE 
+            WHEN LAG(s.total_sales) OVER (ORDER BY s.year) IS NULL THEN NULL
+            ELSE ((s.total_sales - LAG(s.total_sales) OVER (ORDER BY s.year)) / 
+                  LAG(s.total_sales) OVER (ORDER BY s.year)) * 100
+        END AS growth_percentage
+    FROM yearly_sales s
+)
+
+-- Growth over the years
+SELECT 
+    year,
+    total_sales,
+    growth_percentage
+FROM yearly_growth
+ORDER BY year;
+
